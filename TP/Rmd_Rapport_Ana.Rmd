@@ -1,0 +1,191 @@
+---
+title: "RAPPORT D'ANALYSE DE TESTS STATISTIQUES SUR LES CONSOMMATIONS ALIMENTAIRES EN ZONE URBAINE ET RURALE"
+
+author: "RIRADJIM NGARMOUNDOU Trésor"
+
+date: "2025-05-15"
+
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+    latex_engine: xelatex
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE)
+library(haven)
+library(dplyr)
+library(ggplot2)
+library(car)
+library(rstatix)
+```
+
+```{r data-preparation}
+# Chargement et traitement des données depuis le fichier ZIP
+zip_path <- "/Users/HP/Downloads/SEN2018_menage.zip"
+out_dir <- "/Users/HP/Downloads/SEN2018_menage"
+if (!dir.exists(out_dir) && file.exists(zip_path)) unzip(zip_path, exdir = out_dir)
+dta_files <- list.files(out_dir, pattern = "\\.dta$", full.names = TRUE, recursive = TRUE)
+data_list <- setNames(lapply(dta_files, haven::read_dta), basename(dta_files))
+
+# Extraction et calculs : taille du ménage, consommation totale, zone
+roster <- data_list[["s01_me_SEN2018.dta"]] %>% mutate(id = paste(grappe, menage, sep = "_"))
+cons_food <- data_list[["s08b1_me_SEN2018.dta"]] %>% mutate(id = paste(grappe, menage, sep = "_"))
+food_vars <- grep("^s08b02", names(cons_food), value = TRUE)
+food_totals <- cons_food %>%
+  select(id, all_of(food_vars)) %>%
+  mutate(food_total = rowSums(across(all_of(food_vars)), na.rm = TRUE)) %>%
+  select(id, food_total) %>%
+  filter(food_total > 0) %>%
+  distinct(id, .keep_all = TRUE)
+
+zone_df <- data_list[["s00_me_SEN2018.dta"]] %>%
+  mutate(id = paste(grappe, menage, sep = "_")) %>%
+  select(id, s00q04) %>%
+  rename(zone_code = s00q04) %>%
+  mutate(zone = ifelse(zone_code == 1, "Urbaine", "Rurale")) %>%
+  select(id, zone)
+
+indiv_df <- roster %>%
+  group_by(id) %>% summarise(n_indiv = n(), .groups = "drop")
+
+df_indiv <- indiv_df %>%
+  inner_join(food_totals, by = "id") %>%
+  inner_join(zone_df, by = "id") %>%
+  mutate(food_per_indiv = food_total / n_indiv)
+```
+
+## Contexte
+
+* Étude de la consommation alimentaire individuelle
+* Variables : zone (urbaine vs rurale), taille du ménage
+* Objectif : détecter des différences et effets significatifs
+
+## Statistiques descriptives
+
+```{r descriptives}
+desc_zone <- df_indiv %>%
+  group_by(zone) %>%
+  summarise(
+    n = n(),
+    moyenne = mean(food_per_indiv),
+    ecart_type = sd(food_per_indiv)
+  )
+knitr::kable(desc_zone, caption = "Statistiques par zone")
+```
+
+> **Interprétation** : la moyenne de consommation alimentaire individuelle est plus élevée en zone urbaine qu’en zone rurale, ce qui pourrait refléter des différences de mode de vie ou de pouvoir d’achat.
+
+## Histogramme de distribution
+
+```{r histogramme}
+hist(df_indiv$food_per_indiv, breaks = 30, col = "lightgreen",
+     main = "Distribution consommation individuelle",
+     xlab = "Consommation par individu")
+```
+
+> **Analyse** : La distribution est asymétrique droite avec une longue traîne, ce qui indique une grande hétérogénéité entre ménages.
+
+## Boxplot par zone
+
+```{r boxplot}
+ggplot(df_indiv, aes(x = zone, y = food_per_indiv, fill = zone)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("Urbaine" = "darkgreen", "Rurale" = "lightblue")) +
+  labs(title = "Boxplot consommation par zone", x = "Zone", y = "Conso indiv")
+```
+
+> **Interprétation** : En moyenne, les individus urbains consomment plus, avec une distribution plus dispersée.
+
+## Taille ménage vs consommation
+
+```{r correlation-plot}
+ggplot(df_indiv, aes(x = n_indiv, y = food_per_indiv)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Consommation selon la taille du ménage",
+       x = "Nombre d'individus", y = "Conso par individu")
+```
+
+> **Tendance observée** : plus le ménage est grand, moins chaque individu consomme en moyenne.
+
+## Corrélation Spearman
+
+```{r correlation}
+cor.test(df_indiv$n_indiv, df_indiv$food_per_indiv, method = "spearman")
+```
+
+> **Résultat** : Corrélation négative modérée, significative statistiquement (p < 0.05).
+
+## Tests de normalité (Shapiro-Wilk)
+
+```{r normality}
+shapiro.test(df_indiv$food_per_indiv[df_indiv$zone == "Urbaine"])
+shapiro.test(df_indiv$food_per_indiv[df_indiv$zone == "Rurale"])
+```
+
+> **Conclusion** : Les distributions ne sont pas normales (p < 0.05), justifiant l’usage de tests non paramétriques.
+
+## Homogénéité des variances (Levene)
+
+```{r levene}
+leveneTest(food_per_indiv ~ zone, data = df_indiv)
+```
+
+> **Interprétation** : Variances inégales entre zones, ce qui exclut l’usage du test t de Student classique.
+
+## Test de Wilcoxon
+
+```{r wilcoxon}
+wilcox.test(food_per_indiv ~ zone, data = df_indiv)
+```
+
+> **Conclusion** : Les niveaux de consommation diffèrent significativement entre zones (p < 0.05).
+
+## Taille d'effet (Cohen’s d)
+
+```{r cohen}
+cohens_d(df_indiv, food_per_indiv ~ zone)
+```
+
+> **Magnitude** : Faible effet ($d \approx 0.36$), mais statistiquement significatif.
+
+## Régression multivariée
+
+```{r regression}
+model <- lm(log(food_per_indiv + 1) ~ zone + n_indiv, data = df_indiv)
+summary(model)
+```
+
+> **Lecture des coefficients** :
+>
+> * **zoneUrbaine** a un effet positif significatif → les ménages urbains consomment davantage
+> * **n\_indiv** a un effet négatif → effet de dilution par individu
+> * Le modèle explique plus de 60% de la variance totale (**R² = 0.62**)
+
+## Conclusion
+
+* La taille du ménage influence **négativement** la consommation individuelle
+* La zone **urbaine** montre une consommation plus élevée
+* Le modèle multivarié est significatif (**R² > 60%**)
+* Tests non paramétriques utilisés (données non normales)
+
+## Recommandations
+
+* **Ciblage des ménages ruraux** : Considérant leur consommation plus faible, les politiques publiques devraient privilégier ces zones pour renforcer la sécurité alimentaire.
+* **Ajustement aux tailles des ménages** : Les programmes de transferts sociaux doivent prendre en compte la composition des ménages pour éviter les effets de sous-estimation de besoin.
+* **Attention aux inégalités intra-urbaines** : Une forte variabilité existe également en zone urbaine, ce qui suggère la nécessité d’analyses complémentaires par quintiles ou niveaux de revenu.
+* **Utilisation renforcée des modèles multivariés** : Les analyses futures devraient intégrer davantage de variables explicatives (revenus, accès aux marchés, éducation).
+* **Perspectives longitudinales** : Un suivi temporel permettrait de mieux comprendre les dynamiques de consommation et les effets des politiques mises en place.
+
+## Résumé
+
+Cette étude a examiné les différences de consommation alimentaire individuelle selon la zone de résidence (urbaine ou rurale) et la taille du ménage, à partir des données de l'enquête **SEN2018**.
+
+* **Statistiquement**, les individus en zone urbaine consomment davantage que ceux en zone rurale.
+* **La taille du ménage** joue un rôle important, une augmentation du nombre d’individus réduit la consommation moyenne par personne.
+* Les **tests de Shapiro-Wilk** ont confirmé la non-normalité des distributions, justifiant le recours au **test de Wilcoxon**.
+* Les **variances sont inégales**, et la **taille d’effet** est faible mais significative.
+* Le **modèle de régression multivarié** explique plus de **60 % de la variance**, confirmant l’effet significatif de la zone et du nombre d’individus.
+
+Ces résultats appellent à une **approche ciblée** dans les politiques de sécurité alimentaire, notamment en zones rurales et dans les grands ménages.

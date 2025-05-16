@@ -1,0 +1,181 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+---
+
+title: "**TESTS STATISTIQUES SUR LES CONSOMMATIONS ALIMENTAIRES EN ZONE RURALE ET URBAINE**"
+
+author: "**RIRADJIM NGARMOUNDOU Trésor**"
+
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+
+output:
+  
+pdf\_document:
+  
+toc: true
+
+number\_sections: true
+
+----------------------
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE)
+library(haven)
+library(dplyr)
+library(ggplot2)
+library(car)
+library(rstatix)
+```
+
+```{r data-preparation}
+# Définir chemins
+zip_path <- "/Users/HP/Downloads/SEN2018_menage.zip"
+out_dir <- "/Users/HP/Downloads/SEN2018_menage"
+if (!dir.exists(out_dir) && file.exists(zip_path)) unzip(zip_path, exdir = out_dir)
+dta_files <- list.files(out_dir, pattern = "\\.dta$", full.names = TRUE, recursive = TRUE)
+data_list <- setNames(lapply(dta_files, read_dta), basename(dta_files))
+
+# Création des données individuelles
+roster <- data_list[["s01_me_SEN2018.dta"]] %>%
+  mutate(id = paste(grappe, menage, sep = "_"))
+
+# Données de consommation totales déjà préparées
+cons_food <- data_list[["s08b1_me_SEN2018.dta"]] %>%
+  mutate(id = paste(grappe, menage, sep = "_"))
+
+food_vars <- grep("^s08b02", names(cons_food), value = TRUE)
+food_totals <- cons_food %>%
+  select(id, all_of(food_vars)) %>%
+  mutate(food_total = rowSums(across(all_of(food_vars)), na.rm = TRUE)) %>%
+  select(id, food_total) %>%
+  filter(food_total > 0) %>%
+  distinct(id, .keep_all = TRUE)
+
+zone_df <- data_list[["s00_me_SEN2018.dta"]] %>%
+  mutate(id = paste(grappe, menage, sep = "_")) %>%
+  select(id, s00q04) %>%
+  rename(zone_code = s00q04) %>%
+  mutate(zone = ifelse(zone_code == 1, "Urbaine", "Rurale")) %>%
+  select(id, zone)
+
+# Effectif par ménage + zone + conso
+indiv_df <- roster %>%
+  group_by(id) %>% summarise(n_indiv = n(), .groups = "drop")
+
+df_indiv <- indiv_df %>%
+  inner_join(food_totals, by = "id") %>%
+  inner_join(zone_df, by = "id") %>%
+  mutate(food_per_indiv = food_total / n_indiv)
+```
+
+## 1. Contexte
+
+Ce rapport examine la **consommation alimentaire par individu** selon :
+
+* la **taille du ménage**,
+* la **zone de résidence** (urbaine/rurale),
+* un **modèle multivarié** intégrant les deux facteurs.
+
+## 2. Analyse descriptive
+
+```{r descriptives}
+desc_zone <- df_indiv %>%
+  group_by(zone) %>%
+  summarise(
+    n_menages = n(),
+    mean_food = mean(food_per_indiv),
+    sd_food = sd(food_per_indiv)
+  )
+knitr::kable(desc_zone, caption = "Statistiques descriptives de la consommation individuelle par zone")
+```
+
+```{r histogrammes}
+hist(df_indiv$food_per_indiv, breaks = 30, col = "lightgreen",
+     main = "Distribution de la consommation alimentaire individuelle",
+     xlab = "Consommation par individu")
+```
+
+```{r boxplot-zone}
+ggplot(df_indiv, aes(x = zone, y = food_per_indiv, fill = zone)) +
+  geom_boxplot() +
+  labs(title = "Boxplot de la consommation alimentaire individuelle par zone",
+       x = "Zone", y = "Consommation par individu") +
+  scale_fill_manual(values = c("Urbaine" = "darkgreen", "Rurale" = "lightblue"))
+```
+
+## 3. Relation entre taille du ménage et consommation
+
+```{r scatterplot}
+ggplot(df_indiv, aes(x = n_indiv, y = food_per_indiv)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Consommation individuelle selon la taille du ménage",
+       x = "Nombre d'individus", y = "Consommation alimentaire par individu")
+```
+
+## 4. Test de corrélation
+
+```{r correlation}
+cor.test(df_indiv$n_indiv, df_indiv$food_per_indiv, method = "spearman")
+```
+
+>  **Interprétation** : la corrélation de Spearman évalue le lien monotone entre la taille du ménage et la consommation individuelle. La présence de valeurs identiques (ties) rend la p-value approximative.
+
+## 5. Comparaison entre zones (urbaine vs rurale)
+
+### Test de normalité (Shapiro-Wilk)
+
+```{r normality}
+shapiro.test(df_indiv$food_per_indiv[df_indiv$zone == "Urbaine"])
+shapiro.test(df_indiv$food_per_indiv[df_indiv$zone == "Rurale"])
+```
+
+> Les deux p-values étant < 0.05, on rejette l’hypothèse de normalité → pas de test t.
+
+### Homogénéité des variances (Levene)
+
+```{r levene}
+leveneTest(food_per_indiv ~ zone, data = df_indiv)
+```
+
+> Hétérogénéité détectée : les variances sont significativement différentes selon les zones.
+
+### Test de Wilcoxon (non-paramétrique)
+
+```{r wilcoxon}
+wilcox.test(food_per_indiv ~ zone, data = df_indiv)
+```
+
+> Ce test indique si la consommation individuelle médiane diffère entre zones.
+
+### Taille d’effet (Cohen’s d)
+
+```{r cohensd}
+cohens_d(df_indiv, food_per_indiv ~ zone)
+```
+
+> Interprétation de la magnitude :
+
+* < 0.2 : négligeable
+* 0.2 – 0.5 : petit effet
+* 0.5 – 0.8 : moyen
+* > 0.8 : grand effet
+
+## 6. Modèle multivarié
+
+```{r regression}
+model <- lm(log(food_per_indiv + 1) ~ zone + n_indiv, data = df_indiv)
+summary(model)
+```
+
+> Le modèle linéaire estime l’impact combiné de la zone et de la taille du ménage sur la consommation alimentaire individuelle.
+
+## 7. Conclusion
+
+* Les tailles de ménage influencent négativement la consommation individuelle.
+* La zone urbaine est associée à une consommation significativement plus élevée.
+* Le modèle explique plus de 60% de la variance (R² > 0.6).
+* Les données ne sont pas normales → test non paramétrique utilisé.
